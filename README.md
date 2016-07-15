@@ -1,5 +1,7 @@
 # Welcome to Apache Joshua (Incubating)
-<img src="https://s.apache.org/joshua_logo" align="right" width="300" />
+<img src="https://s.apache.org/joshua_logo" align="right" width="350" />
+
+With improved descriptions
 
 Joshua is a statistical machine translation toolkit for both
 phrase-based (new in version 6.0) and syntax-based decoding. It can be
