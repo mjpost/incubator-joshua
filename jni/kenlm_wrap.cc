@@ -1,9 +1,25 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "lm/enumerate_vocab.hh"
 #include "lm/model.hh"
 #include "lm/left.hh"
 #include "lm/state.hh"
 #include "util/murmur_hash.hh"
-#include "util/pool.hh"
 
 #include <iostream>
 
@@ -13,7 +29,8 @@
 #include <pthread.h>
 
 // Grr.  Everybody's compiler is slightly different and I'm trying to not depend on boost.
-#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 // Verify that jint and lm::ngram::WordIndex are the same size. If this breaks
 // for you, there's a need to revise probString.
@@ -28,42 +45,66 @@ template<> struct StaticCheck<true> {
 
 typedef StaticCheck<sizeof(jint) == sizeof(lm::WordIndex)>::StaticAssertionPassed FloatSize;
 
-typedef std::unordered_map<uint64_t, lm::ngram::ChartState*> PoolHash;
+// Could be uint64_t if you wanted to have 33-bit support.
+typedef uint32_t StateIndex;
+typedef std::vector<lm::ngram::ChartState> StateVector;
 
-/**
- * A Chart bundles together a hash_map that maps ChartState signatures to a single object
- * instantiated using a pool. This allows duplicate states to avoid allocating separate
- * state objects at multiple places throughout a sentence, and also allows state to be
- * shared across KenLMs for the same sentence.
- */
-struct Chart {
-  // A cache for allocated chart objects
-  PoolHash* poolHash;
-  // Pool used to allocate new ones
-  util::Pool* pool;
+class HashIndex : public std::unary_function<StateIndex, uint64_t> {
+  public:
+    explicit HashIndex(const StateVector &vec) : vec_(vec) {}
 
-  Chart() {
-    poolHash = new PoolHash();
-    pool = new util::Pool();
-  }
-
-  ~Chart() {
-    delete poolHash;
-    pool->FreeAll();
-    delete pool;
-  }
-
-  lm::ngram::ChartState* put(const lm::ngram::ChartState& state) {
-    uint64_t hashValue = lm::ngram::hash_value(state);
-
-    if (poolHash->find(hashValue) == poolHash->end()) {
-      lm::ngram::ChartState* pointer = (lm::ngram::ChartState *)pool->Allocate(sizeof(lm::ngram::ChartState));
-      *pointer = state;
-      (*poolHash)[hashValue] = pointer;
+    uint64_t operator()(StateIndex index) const {
+      return hash_value(vec_[index]);
     }
 
-    return (*poolHash)[hashValue];
-  }
+  private:
+    const StateVector &vec_;
+};
+
+class EqualIndex : public std::binary_function<StateIndex, StateIndex, bool> {
+  public:
+    explicit EqualIndex(const StateVector &vec) : vec_(vec) {}
+
+    bool operator()(StateIndex first, StateIndex second) const {
+      return vec_[first] == vec_[second];
+    }
+
+  private:
+    const StateVector &vec_;
+};
+
+typedef std::unordered_set<StateIndex, HashIndex, EqualIndex> Lookup;
+
+/**
+ * A Chart bundles together a vector holding CharStates and an unordered_set of StateIndexes
+ * which provides a mapping between StateIndexes and the positions of ChartStates in the vector.
+ * This allows for duplicate states to avoid allocating separate state objects at multiple places
+ * throughout a sentence.
+ */
+class Chart {
+  public:
+    Chart(long* ngramBuffer) : 
+    ngramBuffer_(ngramBuffer),
+    lookup_(1000, HashIndex(vec_), EqualIndex(vec_)) {}
+
+    StateIndex Intern(const lm::ngram::ChartState &state) {
+      vec_.push_back(state);
+      std::pair<Lookup::iterator, bool> ins(lookup_.insert(vec_.size() - 1));
+      if (!ins.second) {
+        vec_.pop_back();
+      }
+      return *ins.first + 1; // +1 so that the first id is 1, not 0.  We use sign bit to 
+                             // distinguish ChartState from vocab id.  
+    }
+
+    const lm::ngram::ChartState &InterpretState(StateIndex index) const {
+      return vec_[index - 1];
+    }
+    long* ngramBuffer_;
+
+  private:
+    StateVector vec_;
+    Lookup lookup_;
 };
 
 // Vocab ids above what the vocabulary knows about are unknown and should
@@ -97,9 +138,11 @@ public:
   // Returns the internal lm::WordIndex for a string
   virtual uint GetLmId(const StringPiece& word) const = 0;
 
+  virtual bool IsLmOov(const int joshua_id) const = 0;
+
   virtual bool IsKnownWordIndex(const lm::WordIndex& id) const = 0;
 
-  virtual float ProbRule(jlong *begin, jlong *end, lm::ngram::ChartState& state) const = 0;
+  virtual float ProbRule(lm::ngram::ChartState& state, const Chart &chart) const = 0;
 
   virtual float ProbString(jint * const begin, jint * const end,
       jint start) const = 0;
@@ -110,22 +153,9 @@ public:
 
   virtual bool RegisterWord(const StringPiece& word, const int joshua_id) = 0;
 
-  void RememberReturnMethod(jclass chart_pair, jmethodID chart_pair_init) {
-    chart_pair_ = chart_pair;
-    chart_pair_init_ = chart_pair_init;
-  }
-
-  jclass ChartPair() const { return chart_pair_; }
-  jmethodID ChartPairInit() const { return chart_pair_init_; }
-
 protected:
   VirtualBase() {
   }
-
-private:
-  // Hack: these are remembered so we can avoid looking them up every time.
-  jclass chart_pair_;
-  jmethodID chart_pair_init_;
 };
 
 template<class Model> class VirtualImpl: public VirtualBase {
@@ -158,16 +188,28 @@ public:
     return m_.GetVocabulary().Index(word);
   }
 
+  bool IsLmOov(const int joshua_id) const {
+    if (map_.size() <= joshua_id) {
+      return true;
+    }
+    return !IsKnownWordIndex(map_[joshua_id]);
+  }
+
   bool IsKnownWordIndex(const lm::WordIndex& id) const {
       return id != m_.GetVocabulary().NotFound();
   }
 
-  float ProbRule(jlong * const begin, jlong * const end, lm::ngram::ChartState& state) const {
+  float ProbRule(lm::ngram::ChartState& state, const Chart &chart) const {
+
+    // By convention the first long in the ngramBuffer denotes the size of the buffer
+    long* begin = chart.ngramBuffer_ + 1;
+    long* end = begin + *chart.ngramBuffer_;
+
     if (begin == end) return 0.0;
     lm::ngram::RuleScore<Model> ruleScore(m_, state);
 
     if (*begin < 0) {
-      ruleScore.BeginNonTerminal(*reinterpret_cast<const lm::ngram::ChartState*>(-*begin));
+      ruleScore.BeginNonTerminal(chart.InterpretState(-*begin));
     } else {
       const lm::WordIndex word = map_[*begin];
       if (word == m_.GetVocabulary().BeginSentence()) {
@@ -179,7 +221,7 @@ public:
     for (jlong* i = begin + 1; i != end; i++) {
       long word = *i;
       if (word < 0)
-        ruleScore.NonTerminal(*reinterpret_cast<const lm::ngram::ChartState*>(-word));
+        ruleScore.NonTerminal(chart.InterpretState(-word));
       else
         ruleScore.Terminal(map_[word]);
     }
@@ -293,7 +335,7 @@ VirtualBase *ConstructModel(const char *file_name) {
 
 extern "C" {
 
-JNIEXPORT jlong JNICALL Java_joshua_decoder_ff_lm_KenLM_construct(
+JNIEXPORT jlong JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_construct(
     JNIEnv *env, jclass, jstring file_name) {
   const char *str = env->GetStringUTFChars(file_name, 0);
   if (!str)
@@ -302,18 +344,6 @@ JNIEXPORT jlong JNICALL Java_joshua_decoder_ff_lm_KenLM_construct(
   VirtualBase *ret;
   try {
     ret = ConstructModel(str);
-
-    // Get a class reference for the type pair that char
-    jclass local_chart_pair = env->FindClass("joshua/decoder/ff/lm/KenLM$StateProbPair");
-    UTIL_THROW_IF(!local_chart_pair, util::Exception, "Failed to find joshua/decoder/ff/lm/KenLM$StateProbPair");
-    jclass chart_pair = (jclass)env->NewGlobalRef(local_chart_pair);
-    env->DeleteLocalRef(local_chart_pair);
-
-    // Get the Method ID of the constructor which takes an int
-    jmethodID chart_pair_init = env->GetMethodID(chart_pair, "<init>", "(JF)V");
-    UTIL_THROW_IF(!chart_pair_init, util::Exception, "Failed to find init method");
-
-    ret->RememberReturnMethod(chart_pair, chart_pair_init);
   } catch (std::exception &e) {
     std::cerr << e.what() << std::endl;
     abort();
@@ -322,30 +352,29 @@ JNIEXPORT jlong JNICALL Java_joshua_decoder_ff_lm_KenLM_construct(
   return reinterpret_cast<jlong>(ret);
 }
 
-JNIEXPORT void JNICALL Java_joshua_decoder_ff_lm_KenLM_destroy(
+JNIEXPORT void JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_destroy(
     JNIEnv *env, jclass, jlong pointer) {
-  VirtualBase *base = reinterpret_cast<VirtualBase*>(pointer);
-  env->DeleteGlobalRef(base->ChartPair());
-  delete base;
+  delete reinterpret_cast<VirtualBase*>(pointer);
 }
 
-JNIEXPORT long JNICALL Java_joshua_decoder_ff_lm_KenLM_createPool(
-    JNIEnv *env, jclass) {
-  return reinterpret_cast<long>(new Chart());
+JNIEXPORT jlong JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_createPool(
+    JNIEnv *env, jclass, jobject arr) {
+  jlong* ngramBuffer = (jlong*)env->GetDirectBufferAddress(arr);
+  Chart *newChart = new Chart(ngramBuffer);
+  return reinterpret_cast<long>(newChart);
 }
 
-JNIEXPORT void JNICALL Java_joshua_decoder_ff_lm_KenLM_destroyPool(
+JNIEXPORT void JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_destroyPool(
     JNIEnv *env, jclass, jlong pointer) {
-  Chart* chart = reinterpret_cast<Chart*>(pointer);
-  delete chart;
+  delete reinterpret_cast<Chart*>(pointer);
 }
 
-JNIEXPORT jint JNICALL Java_joshua_decoder_ff_lm_KenLM_order(
+JNIEXPORT jint JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_order(
     JNIEnv *env, jclass, jlong pointer) {
   return reinterpret_cast<VirtualBase*>(pointer)->Order();
 }
 
-JNIEXPORT jboolean JNICALL Java_joshua_decoder_ff_lm_KenLM_registerWord(
+JNIEXPORT jboolean JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_registerWord(
     JNIEnv *env, jclass, jlong pointer, jstring word, jint id) {
   const char *str = env->GetStringUTFChars(word, 0);
   if (!str)
@@ -361,7 +390,7 @@ JNIEXPORT jboolean JNICALL Java_joshua_decoder_ff_lm_KenLM_registerWord(
   return ret;
 }
 
-JNIEXPORT jfloat JNICALL Java_joshua_decoder_ff_lm_KenLM_prob(
+JNIEXPORT jfloat JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_prob(
     JNIEnv *env, jclass, jlong pointer, jintArray arr) {
   jint length = env->GetArrayLength(arr);
   if (length <= 0)
@@ -374,7 +403,7 @@ JNIEXPORT jfloat JNICALL Java_joshua_decoder_ff_lm_KenLM_prob(
       values + length);
 }
 
-JNIEXPORT jfloat JNICALL Java_joshua_decoder_ff_lm_KenLM_probForString(
+JNIEXPORT jfloat JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_probForString(
     JNIEnv *env, jclass, jlong pointer, jobjectArray arr) {
   jint length = env->GetArrayLength(arr);
   if (length <= 0)
@@ -391,7 +420,13 @@ JNIEXPORT jfloat JNICALL Java_joshua_decoder_ff_lm_KenLM_probForString(
       values + length);
 }
 
-JNIEXPORT jboolean JNICALL Java_joshua_decoder_ff_lm_KenLM_isKnownWord(
+JNIEXPORT jboolean JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_isLmOov(
+    JNIEnv *env, jclass, jlong pointer, jint word) {
+    const VirtualBase* lm_base = reinterpret_cast<const VirtualBase*>(pointer);
+    return lm_base->IsLmOov(word);
+}
+
+JNIEXPORT jboolean JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_isKnownWord(
     JNIEnv *env, jclass, jlong pointer, jstring word) {
     const char *str = env->GetStringUTFChars(word, 0);
     if (!str)
@@ -404,7 +439,7 @@ JNIEXPORT jboolean JNICALL Java_joshua_decoder_ff_lm_KenLM_isKnownWord(
     return ret;
 }
 
-JNIEXPORT jfloat JNICALL Java_joshua_decoder_ff_lm_KenLM_probString(
+JNIEXPORT jfloat JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_probString(
     JNIEnv *env, jclass, jlong pointer, jintArray arr, jint start) {
   jint length = env->GetArrayLength(arr);
   if (length <= start)
@@ -417,26 +452,25 @@ JNIEXPORT jfloat JNICALL Java_joshua_decoder_ff_lm_KenLM_probString(
       values + length, start);
 }
 
-JNIEXPORT jobject JNICALL Java_joshua_decoder_ff_lm_KenLM_probRule(
-  JNIEnv *env, jclass, jlong pointer, jlong chartPtr, jlongArray arr) {
-  jint length = env->GetArrayLength(arr);
-  // GCC only.
-  jlong values[length];
-  env->GetLongArrayRegion(arr, 0, length, values);
+union FloatConverter {
+  float f;
+  uint32_t i;
+};
+
+JNIEXPORT jlong JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_probRule(
+  JNIEnv *env, jclass, jlong pointer, jlong chartPtr) {
 
   // Compute the probability
   lm::ngram::ChartState outState;
   const VirtualBase *base = reinterpret_cast<const VirtualBase*>(pointer);
-  float prob = base->ProbRule(values, values + length, outState);
-
   Chart* chart = reinterpret_cast<Chart*>(chartPtr);
-  lm::ngram::ChartState* outStatePtr = chart->put(outState);
-
-  // Call back constructor to allocate a new instance, with an int argument
-  return env->NewObject(base->ChartPair(), base->ChartPairInit(), (long)outStatePtr, prob);
+  FloatConverter prob;
+  prob.f = base->ProbRule(outState, *chart);
+  StateIndex index = chart->Intern(outState);
+  return static_cast<uint64_t>(index) << 32 | static_cast<uint64_t>(prob.i);
 }
 
-JNIEXPORT jfloat JNICALL Java_joshua_decoder_ff_lm_KenLM_estimateRule(
+JNIEXPORT jfloat JNICALL Java_org_apache_joshua_decoder_ff_lm_KenLM_estimateRule(
   JNIEnv *env, jclass, jlong pointer, jlongArray arr) {
   jint length = env->GetArrayLength(arr);
   // GCC only.
