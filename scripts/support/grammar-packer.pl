@@ -12,6 +12,10 @@
 #    input-grammar is the input grammar to be packed
 #    output-dir is the packed grammar directory to write to (default: grammar.packed)
 #    packer-config is the packer config file (default: all floats)
+#
+# This script *requires* the grammar to be in Hiero format. If you are working with a
+# phrase-based model (either extracted from Thrax or from Moses) you must first convert it
+# to Hiero format using the script $JOSHUA/scripts/support/phrase2hiero.py.
 
 use strict;
 use warnings;
@@ -20,7 +24,7 @@ use File::Temp qw/tempfile/;
 use File::Basename qw/basename/;
 
 my %opts = (
-  a => 1,         # whether alignments are included in the grammar(s)
+  a => 0,         # whether alignments are included in the grammar(s)
   g => '',        # comma-separated list of grammars to pack
   o => '',        # comma-separated list of grammar output directories
   m => '8g',      # amount of memory to give the packer
@@ -65,22 +69,11 @@ foreach my $grammar (@grammars) {
   my (undef,$sorted_grammar) = tempfile("${name}XXXX", DIR => $opts{T}, UNLINK => 1);
   print STDERR "Sorting grammar to $sorted_grammar...\n" if $opts{v};
 
-  # We need to sort by source side, which is field 1 (for phrase tables not listing the LHS)
-  # or field 2 (convention, Thrax format)
-  chomp(my $first_line = `$CAT $grammar | head -n1`);
-  if ($first_line =~ /^\[/) {
-    # regular grammar
-    if (system("$CAT $grammar | sed 's/ ||| /\t/g' | LC_ALL=C sort -t'\t' -k2,2 -k3,3 --buffer-size=$opts{m} -T $opts{T} | sed 's/\t/ ||| /g' | gzip -9n > $sorted_grammar")) {
-      print STDERR "* FATAL: Couldn't sort the grammar (not enough memory? short on tmp space?)\n";
-      exit 2;
-    }
-  } else {
-    # Moses phrase-based grammar -- prepend nonterminal symbol and -log() the weights
-    if (system("$CAT $grammar | $JOSHUA/scripts/support/moses_phrase_to_joshua.pl | sed 's/ ||| /\t/g' | LC_ALL=C sort -t'\t' -k2,2 -k3,3 --buffer-size=$opts{m} -T $opts{T} | sed 's/\t/ ||| /g' | gzip -9n > $sorted_grammar")) {
-      print STDERR "* FATAL: Couldn't sort the grammar (not enough memory? short on tmp space?)\n";
-      exit 2;
-    }
-  }  
+  # regular grammar
+  if (system("$CAT $grammar | sed 's/ ||| /\t/g' | LC_ALL=C sort -t'\t' -k2,2 -k3,3 --buffer-size=$opts{m} -T $opts{T} | sed 's/\t/ ||| /g' | gzip -9n > $sorted_grammar")) {
+    print STDERR "* FATAL: Couldn't sort the grammar (not enough memory? short on tmp space?)\n";
+    exit 2;
+  }
 
   push(@sorted_grammars, $sorted_grammar);
 }
@@ -90,7 +83,7 @@ foreach my $grammar (@grammars) {
 my $grammars = join(" ", @sorted_grammars);
 my $outputs  = join(" ", @outputs);
 my $alignments = $opts{a} ? "--ga" : "";
-my $cmd = "java -Xmx$opts{m} -cp $JOSHUA/lib/args4j-2.0.29.jar:$JOSHUA/class joshua.tools.GrammarPackerCli -g $grammars --outputs $outputs $alignments";
+my $cmd = "java -Xmx$opts{m} -cp $JOSHUA/target/joshua-*-jar-with-dependencies.jar org.apache.joshua.tools.GrammarPackerCli -g $grammars --outputs $outputs $alignments";
 print STDERR "Packing with $cmd...\n" if $opts{v};
 
 my $retval = system($cmd);

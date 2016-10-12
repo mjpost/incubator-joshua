@@ -41,7 +41,6 @@ doxygen_*.tmp
 *.so
 .cachepipe
 
-joshua-decoder.org
 release
 
 scripts/training/MGIZA/
@@ -54,6 +53,11 @@ bin
 build
 **.history
 .settings
-/eclipse-bin/
 .classpath
-/target/
+target/
+.project
+doc/
+ext/
+thrax/
+test-output
+joshua-core/test-output
