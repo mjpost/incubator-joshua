@@ -1,4 +1,4 @@
-package joshua.decoder.ff;
+package org.apache.joshua.decoder.ff;
 
 import java.io.Serializable;
 import java.io.StringReader;
