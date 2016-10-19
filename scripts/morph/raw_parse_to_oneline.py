@@ -35,7 +35,7 @@ for line in sys.stdin:
     elif args.dep_output and line == '\n':
         dep_output.write('\n')
 
-    elif args.dep_output and re.match(r'^[a-zA-Z:]+\(.*,.*\)', line):
+    elif args.dep_output and re.match(r'^[a-zA-Z:_]+\(.*,.*\)', line):
         dep_output.write(line.rstrip().replace(', ', ',') + ' ')
 
 
