@@ -18,9 +18,11 @@ if args.ptb_output:
 if args.dep_output:
     dep_output = open(args.dep_output, 'w')
 
+first = True
 for line in sys.stdin:
     # failed parses
     if line.startswith('(('):
+        first = True
         if args.ptb_output:
             ptb_output.write('\n')
         if args.dep_output:
@@ -29,14 +31,19 @@ for line in sys.stdin:
         continue
 
     if line.startswith('('):
+        first = True
         if args.ptb_output:
             ptb_output.write(line)
 
     elif args.dep_output and line == '\n':
         dep_output.write('\n')
 
-    elif args.dep_output and re.match(r'^[a-zA-Z:_\']+\(.*,.*\)', line):
-        dep_output.write(line.rstrip().replace(', ', ',') + ' ')
+    elif args.dep_output and re.match(r'^.+\(.*,.*\)', line):
+        if not first:
+            dep_output.write('  ')
+        first = False
+        
+        dep_output.write(line.rstrip())
 
 
     
