@@ -25,19 +25,19 @@ import argparse
 parser = argparse.ArgumentParser(description='Add features to source corpus words')
 parser.add_argument('--vocab_file', type=file, help='Location of vocabulary file (for thresholding)')
 parser.add_argument('-t', type=int, default=0, help='Map words with frequency < t to UNK')
-parser.add_argument('-chain', default=5, type=int, help='Add parent chain')
 parser.add_argument('-dep_chain', default=2, type=int, help='Add parent dependency chain')
 parser.add_argument('-pos', default=True, action='store_true')
 parser.add_argument('-head-pos', default=True, action='store_true')
 parser.add_argument('-prepositions', default=True, action='store_true')
 parser.add_argument('-determiners', default=True, action='store_true')
 parser.add_argument('-pos-context', default=2, type=int, help='Context POS tags (both sides)')
-parser.add_argument('-parent', default=True, action='store_true')
-parser.add_argument('-grandparent', default=True, action='store_true')
-parser.add_argument('-great-grandparent', default=True, action='store_true')
-parser.add_argument('-distance', dest='distance_to_root', default=True, action='store_true')
-parser.add_argument('-word', default=True, action='store_true', help='output the word itself')
-parser.add_argument('-context', default=2, type=int, help='Context words (both sides)')
+parser.add_argument('-chain', default=0, type=int, help='Add parent chain')
+parser.add_argument('-parent', default=False, action='store_true')
+parser.add_argument('-grandparent', default=False, action='store_true')
+parser.add_argument('-great-grandparent', default=False, action='store_true')
+parser.add_argument('-distance', dest='distance_to_root', default=False, action='store_true')
+parser.add_argument('-word', default=False, action='store_true', help='output the word itself')
+parser.add_argument('-context', default=0, type=int, help='Context words (both sides)')
 args = parser.parse_args()
 
 from itertools import izip
@@ -59,6 +59,35 @@ def parent_chain(node, height=1000):
             parent = parent.parent()
         return '_'.join(chain)
 
+
+class DepArc:
+    def __init__(self, label, from_index, to_index):
+        self.label = label
+        self.parent_index = from_index
+        self.child_index = to_index
+
+class DepNode:
+    def __init__(self):
+        self.word = None
+        self.index = None
+        self.parent_arc = None
+        self.child_arcs = []
+
+    def parent(self, dep_chain):
+        if self.parent_arc is not None:
+#            print "PARENT of", self.word, "=", self.parent_arc.parent_index
+            return dep_chain[self.parent_arc.parent_index]
+        return None
+
+    def parent_label(self, dep_chain):
+        if self.parent_arc is not None:
+            return self.parent_arc.label
+        return None
+
+PUNC = ". , ; '' `` :".split()
+def is_punc(pos):
+    return pos in PUNC
+
 for sentno, line in enumerate(sys.stdin):
 
     parse_line, dep_parse_line = line.rstrip().split('\t')
@@ -68,62 +97,43 @@ for sentno, line in enumerate(sys.stdin):
 
     tree = ptb.parse(parse_line).next()
     words = ptb.leaves(tree)
-
-    # print '\n*', 'SENTNO', sentno, 'HAS', len(words), 'WORDS'
-
-    class DepArc:
-        def __init__(self, label, from_index, to_index):
-            self.label = label
-            self.parent_index = from_index
-            self.child_index = to_index
-
-    class DepNode:
-        def __init__(self):
-            self.word = None
-            self.parent_arc = None
-            self.child_arcs = []
-
-        def parent(self, dep_chain):
-            if self.parent_arc is not None:
-#                print "PARENT of", self.word, "=", self.parent_arc.parent_index
-                return dep_chain[self.parent_arc.parent_index]
-            return None
-
-        def parent_label(self, dep_chain):
-            if self.parent_arc is not None:
-                return self.parent_arc.label
-            return None
-
+    
+#    print '\n*', 'SENTNO', sentno, 'HAS', len(words), 'WORDS'
 
     # Build the dependency chain
     dep_chain = [DepNode() for x in [0] + words]
-    for token in dep_parse_line.split():
-        if re.search(r',.*,', token):
-            continue
-        match = re.match(r'(\S+)\((\S+?)-(\d+),(\S+)-(\d+)\)', token)
+    dep_chain[0].word = 'ROOT'
+    dep_chain[0].pos = 'ROOT'
+    for token in dep_parse_line.split('  '):
+        match = re.match(r'(.+)\((.+?)-(\d+)\'{0,}, (.+?)-(\d+)\)', token)
         # (tail,index) -> label -> (head,hindex)
+        # Sometimes you get bad tokens like nsubj(spoke-3',fried-1)
         try:
             label,parent,pindex,child,cindex = match.groups()
         except AttributeError:
-            # sys.stderr.write("* WARNING: bad token '%s' on %s/line %d\n" % (token, args.dep_parses_file, i + 1))
+#            sys.stderr.write("* WARNING: bad token '%s' on %s/line %d\n" % (token, dep_parse_line, sentno + 1))
             continue
 #        print "** {}[{}] -> {} -> {}[{}]".format(child, cindex, label, parent, pindex)
-        if ':' in label:
-            continue
 
-        dep_chain[int(cindex)].word = child
-        dep_chain[int(pindex)].child_arcs.append(DepArc(label,int(pindex),int(cindex)))
-        dep_chain[int(cindex)].parent_arc = DepArc(label,int(pindex),int(cindex))
-        
+        try:
+            dep_chain[int(cindex)].word = child
+            dep_chain[int(cindex)].pos = words[int(cindex)-1].leaf().pos
+            dep_chain[int(cindex)].index = int(cindex)
+            dep_chain[int(pindex)].child_arcs.append(DepArc(label,int(pindex),int(cindex)))
+            dep_chain[int(cindex)].parent_arc = DepArc(label,int(pindex),int(cindex))
+        except IndexError:
+            sys.stderr.write("index error on sentence {} child index {} parent index {}\n".format(sentno + 1, cindex, pindex))
+            sys.stderr.write("token = {} label = {} parent = {} pindex = {} child = {} cindex = {}\n".format(token, label, parent, pindex, child, cindex))
+            sys.exit(1)
+            
     # Sanity check: maybe sure words in parse line up with words in the input sentence
     # For each arc in the parse
-    for i, depnode in enumerate(dep_chain[1:]):
-        if depnode is not None:
-            word = depnode.word
-            # make sure the annotated word in the annotations file is that word
-            if word is not None and not words[i].leaf().word == word:
-                sys.stderr.write("* FATAL: mismatch between words in parse and input: %s / %s\n" % (words[i], word))
-                sys.exit(1)
+    for (wordno, leaf) in enumerate(words):
+        cfgword = leaf.leaf().word
+        depword = dep_chain[wordno+1].word
+        pos = leaf.leaf().pos
+        if not is_punc(pos) and cfgword != depword:
+            sys.stderr.write("* WARNING: line %d mismatch between words in CFG parse (%s/%d) and DEP parse (%s/%d) %s %s\n" % (sentno + 1, cfgword, wordno, depword, wordno + 1, pos, is_punc(pos)))
 
     for wordno, leaf in enumerate(words):
         word = leaf.leaf().word
@@ -149,23 +159,29 @@ for sentno, line in enumerate(sys.stdin):
                     features.append(text_feature('cfg-chain%d=%s' % (num, '_'.join(chain[:num]))))
 
         depnode = dep_chain[wordno + 1]
+
         if args.dep_chain > 0:
             dep_parent_chain = []
             dep_label_chain = []
+            dep_pos_chain = []
             label = depnode.parent_label(dep_chain)
             parent = depnode.parent(dep_chain)
             parent_i = 1
-            while parent is not None:
+            seen = []
+            while parent is not None and parent.index not in seen:
+                seen.append(parent.index)
                 if parent.word is not None:
                     # a lex feature of just the parent
                     features.append(text_feature('LEX^dep-parent%d=%s' % (parent_i, parent.word)))
 
                     dep_parent_chain.append(parent.word)
+                    dep_pos_chain.append(parent.pos)
                     if len(dep_parent_chain) > 1:
                         features.append(text_feature('dep-chain-word%d=%s' % (parent_i, '_'.join(dep_parent_chain))))
                 
                 dep_label_chain.append(label)
                 features.append(text_feature('dep-chain-label%d=%s' % (parent_i, '_'.join(dep_label_chain))))
+                features.append(text_feature('dep-chain-pos%d=%s' % (parent_i, '_'.join(dep_pos_chain))))
 
                 label = parent.parent_label(dep_chain)
                 parent = parent.parent(dep_chain)
@@ -227,8 +243,9 @@ for sentno, line in enumerate(sys.stdin):
             return word
 
         if args.word:
-            features.append(text_feature('LEX^word=%s' % (mask_word(leaf.leaf().word))))
             features.append(text_feature('LEX^real-word=%s' % (leaf.leaf().word)))
+            if args.t > 0:
+                features.append(text_feature('LEX^word=%s' % (mask_word(leaf.leaf().word))))
 
         if args.context > 0:
             width = args.context
@@ -247,5 +264,6 @@ for sentno, line in enumerate(sys.stdin):
                     features.append(text_feature('LEX^context-right%d=%s' % (i - wordno, mask_word(words[i].leaf().word))))
         
         print '%s[%s]' % (word, '|'.join(features)),
+        sys.stdout.flush()
 
     print
