@@ -1,4 +1,4 @@
-package joshua.decoder.ff;
+package org.apache.joshua.decoder.ff;
 
 /***
  * This feature function scores a rule application by predicting, for each target word aligned with
@@ -31,18 +31,18 @@ import java.util.Scanner;
 
 import cc.mallet.classify.*;
 import cc.mallet.types.Labeling;
-import joshua.corpus.Vocabulary;
-import joshua.decoder.Decoder;
-import joshua.decoder.JoshuaConfiguration;
-import joshua.decoder.chart_parser.SourcePath;
-import joshua.decoder.ff.FeatureVector;
-import joshua.decoder.ff.StatelessFF;
-import joshua.decoder.ff.state_maintenance.DPState;
-import joshua.decoder.ff.tm.Rule;
-import joshua.decoder.hypergraph.HGNode;
-import joshua.decoder.segment_file.Sentence;
-import joshua.decoder.segment_file.Token;
-import joshua.util.io.LineReader;
+import org.apache.joshua.corpus.Vocabulary;
+import org.apache.joshua.decoder.Decoder;
+import org.apache.joshua.decoder.JoshuaConfiguration;
+import org.apache.joshua.decoder.chart_parser.SourcePath;
+import org.apache.joshua.decoder.ff.FeatureVector;
+import org.apache.joshua.decoder.ff.StatelessFF;
+import org.apache.joshua.decoder.ff.state_maintenance.DPState;
+import org.apache.joshua.decoder.ff.tm.Rule;
+import org.apache.joshua.decoder.hypergraph.HGNode;
+import org.apache.joshua.decoder.segment_file.Sentence;
+import org.apache.joshua.decoder.segment_file.Token;
+import org.apache.joshua.util.io.LineReader;
 
 import static org.kohsuke.args4j.ExampleMode.ALL;
 import org.kohsuke.args4j.Argument;
@@ -51,10 +51,15 @@ import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 import org.kohsuke.args4j.spi.BooleanOptionHandler;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class LexicalSharpener extends StatelessFF {
 
   private HashMap<String,MalletPredictor> classifiers = null;
   private boolean hasModel = false;
+
+  private static final Logger LOG = LoggerFactory.getLogger(LexicalSharpener.class);
 
   public LexicalSharpener(final FeatureVector weights, String[] args, JoshuaConfiguration config) {
     super(weights, "LexicalSharpener", args, config);
@@ -80,7 +85,7 @@ public class LexicalSharpener extends StatelessFF {
   
     classifiers = new HashMap<String, MalletPredictor>();
 
-    Decoder.LOG(1, "Reading " + dataFile);
+    LOG.info("Reading {}", dataFile);
     LineReader lineReader = null;
     try {
       lineReader = new LineReader(dataFile, true);
@@ -115,7 +120,7 @@ public class LexicalSharpener extends StatelessFF {
     }
     classifiers.put(lastSourceWord, new MalletPredictor(lastSourceWord, examples));
   
-    Decoder.LOG(1, String.format("Read %d lines from training file", linesRead));
+    LOG.info("Read {} lines from training file", linesRead);
     hasModel = true;
   }
 

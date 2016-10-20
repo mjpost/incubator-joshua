@@ -15,11 +15,15 @@ import cc.mallet.pipe.Target2Label;
 import cc.mallet.pipe.iterator.CsvIterator;
 import cc.mallet.types.Instance;
 import cc.mallet.types.InstanceList;
-import joshua.decoder.Decoder;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class MalletPredictor implements Serializable {
     
     private static final long serialVersionUID = 1L;
+
+    private static final Logger LOG = LoggerFactory.getLogger(MalletPredictor.class);
 
     private SerialPipes pipes = null;
     private InstanceList instances = null;
@@ -87,8 +91,8 @@ public class MalletPredictor implements Serializable {
       instances.addThruPipe(new CsvIterator(reader, "(\\S+)\\s+(.*)", 2, -1, 1));
 
       long startTime = System.currentTimeMillis();
-      Decoder.LOG(1, String.format("MalletPredictor: Training a model for '%s' from %d examples",
-          sourceWord, examples.size()));
+      LOG.info("MalletPredictor: Training a model for '{}' from {} examples",
+          sourceWord, examples.size());
       System.err.flush();
 
       ClassifierTrainer trainer = new MaxEntTrainer();
@@ -98,7 +102,7 @@ public class MalletPredictor implements Serializable {
       for (Object outcome: pipes.getTargetAlphabet().toArray()) {
         outcomes += outcome.toString() + " ";
       }
-      Decoder.LOG(1, String.format("-> %d outcomes in %.1fs: ", getNumOutcomes(),(System.currentTimeMillis() - startTime) / 1000.0, outcomes ));
+      LOG.info("-> {} outcomes in {}s: ", getNumOutcomes(),(System.currentTimeMillis() - startTime) / 1000.0, outcomes );
       System.err.flush();
 
       // Decoder.LOG(1, String.format("MalletPredictor: Trained model for '%s' over %d outcomes from %d examples in %.1fs", 
